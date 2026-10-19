@@ -32,18 +32,63 @@ function quoteMessage(r){
  lines.push(``,`Additional notes: ${r.notes||'None'}`,``,`BOOKING TERMS AND CONDITIONS`,`Working draft — subject to legal review before customer use.`,terms?terms.innerText.replace(/Working draft — subject to legal review before customer use\./,'').trim():'See attached quotation for full terms.',``,`Please reply in writing to confirm acceptance of the quotation and booking terms. Your booking is confirmed only after acceptance and receipt of the booking fee.`,``,`The Piccolo Box | thepiccolobox.co.uk`);
  return lines.join('\n');
 }
+// Self-contained PDF writer: no external scripts or customer data transmitted.
+function makeQuotePDF(r){
+ previewQuote(r.id);
+ const terms=[...document.querySelectorAll('#printQuote .quote-terms h3,#printQuote .quote-terms h4,#printQuote .quote-terms p')].map(e=>({heading:/^H[34]$/.test(e.tagName),text:e.textContent.trim()}));
+ const norm=t=>String(t??'').replace(/[\u2018\u2019]/g,"'").replace(/[\u2013\u2014]/g,'-').replace(/\u00a3/g,'£').replace(/[^\x20-\x7e\xa0-\xff]/g,' ');
+ const enc=t=>norm(t).replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)');
+ const pages=[];let ops=[],y=0,page=0;
+ const ink='0.19 0.13 0.11',rust='0.78 0.29 0.18';
+ function start(){ops=[];page++;y=750;ops.push('0.09 0.07 0.06 rg 0 775 595 67 re f');ops.push('0.90 0.36 0.23 rg 0 769 595 6 re f');ops.push('1 1 1 rg BT /F2 21 Tf 44 802 Td (THE PICCOLO BOX) Tj ET');ops.push('0.90 0.78 0.66 rg BT /F1 10 Tf 45 786 Td (Small name, big flavour.) Tj ET');ops.push(`${ink} rg`)}
+ function finish(){ops.push('0.60 0.53 0.47 rg BT /F1 9 Tf 45 27 Td (The Piccolo Box  |  thepiccolobox.co.uk  |  Page '+page+') Tj ET');pages.push(ops.join('\n'))}
+ function need(h){if(y-h<55){finish();start()}}
+ function text(t,size=11,bold=false,x=45,step=16){need(step);ops.push(`${ink} rg BT /${bold?'F2':'F1'} ${size} Tf ${x} ${y} Td (${enc(t)}) Tj ET`);y-=step}
+ function wrap(t,size=11,bold=false,x=45,width=505){const max=Math.floor(width/(size*.53));let words=norm(t).split(/\s+/),line='';for(const w of words){if((line+' '+w).trim().length>max&&line){text(line,size,bold,x,size+5);line=w}else line=(line+' '+w).trim()}if(line)text(line,size,bold,x,size+5)}
+ function gap(n=9){y-=n}
+ start();gap(15);text('WEDDING & EVENT QUOTATION',20,true,45,33);
+ text('Quotation reference: '+paymentRef(r),11,true);gap(8);
+ for(const [label,val] of [['Prepared for',r.name],['Event',r.type],['Event date',r.date],['Venue',r.venue],['Serving time',r.time],['Guests',r.guests]])wrap(label+': '+(val||'To confirm'));
+ gap(15);text('CATERING',14,true,45,23);wrap(r.quoteDescription||'Neapolitan stone-baked pizza catering');gap(10);
+ wrap('Price: '+(r.guests||0)+' guests x '+money(r.rate||14)+' per person (minimum £750)');
+ text('QUOTED TOTAL: '+money(amount(r)),17,true,45,30);
+ text('Booking fee (part of total): £250.00',11,true);text('Remaining balance: '+money(Math.max(0,amount(r)-250)),11,true);
+ wrap('Final balance due: '+(daysBefore(r.date,14)||'14 days before the event'));gap(14);
+ text('PAYMENT BY BANK TRANSFER',14,true,45,24);
+ wrap('Account name: '+bankSettings.accountName);wrap('Sort code: '+bankSettings.sortCode.replace(/(..)(..)(..)/,'$1-$2-$3'));
+ wrap('Account number: '+bankSettings.accountNumber);wrap('Payment reference: '+paymentRef(r));gap(12);
+ text('ADDITIONAL NOTES',12,true,45,20);wrap(r.notes||'None recorded');gap(10);
+ wrap('Please reply in writing confirming that you accept the quotation and booking terms.',10,true);
+ wrap('DRAFT: Please review the quotation and obtain legal review of the booking terms before customer use.',9);finish();start();gap(12);
+ text('BOOKING TERMS & CONDITIONS',17,true,45,30);
+ for(const t of terms){if(t.heading){gap(8);wrap(t.text,12,true)}else{wrap(t.text,10,false);gap(5)}}
+ gap(12);wrap('Customer acceptance must be recorded separately. Payment alone does not establish acceptance.',10,true);finish();
+ const objects=[''];const add=s=>(objects.push(s),objects.length-1);
+ const f1=add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+ const f2=add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
+ const kids=[];
+ for(const content of pages){const stream=add('<< /Length '+content.length+' >>\nstream\n'+content+'\nendstream');const pg=add('<< /Type /Page /Parent PARENT 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 '+f1+' 0 R /F2 '+f2+' 0 R >> >> /Contents '+stream+' 0 R >>');kids.push(pg)}
+ const rootPages=add('<< /Type /Pages /Kids ['+kids.map(i=>i+' 0 R').join(' ')+'] /Count '+kids.length+' >>');
+ for(const i of kids)objects[i]=objects[i].replace('PARENT',String(rootPages));
+ const catalog=add('<< /Type /Catalog /Pages '+rootPages+' 0 R >>');
+ let pdf='%PDF-1.4\n%PDF\n',offsets=[0];for(let i=1;i<objects.length;i++){offsets.push(pdf.length);pdf+=i+' 0 obj\n'+objects[i]+'\nendobj\n'}
+ const xref=pdf.length;pdf+='xref\n0 '+objects.length+'\n0000000000 65535 f \n';for(let i=1;i<objects.length;i++)pdf+=String(offsets[i]).padStart(10,'0')+' 00000 n \n';pdf+='trailer\n<< /Size '+objects.length+' /Root '+catalog+' 0 R >>\nstartxref\n'+xref+'\n%%EOF';
+ return new Blob([Uint8Array.from(pdf,c=>c.charCodeAt(0)&255)],{type:'application/pdf'});
+}
 async function sendQuote(id){
  const r=get(id);if(!r)return;
  if(!bankReady()){alert('Please enter your bank details in Settings before sending the quotation.');return}
- previewQuote(id);
- if(!confirm('Check the quotation and draft terms before sharing. Continue to your iPhone share options?'))return;
- const body=quoteMessage(r),subject=`The Piccolo Box quotation — ${r.date||'your event'}`;
- if(navigator.share){try{await navigator.share({title:subject,text:body});return}catch(e){if(e.name==='AbortError')return}}
- const mailto=`mailto:${encodeURIComponent(r.email||'')}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
- if(body.length<12000){window.location.href=mailto;return}
- if(navigator.clipboard){try{await navigator.clipboard.writeText(body);alert('Quote copied. Paste it into your email or WhatsApp message.');return}catch(e){}}
- prompt('Copy quotation:',body);
+ if(!confirm('This PDF includes draft booking terms requiring legal review. Have you checked all details and terms before sharing?'))return;
+ const file=new File([makeQuotePDF(r)],'Piccolo-Box-Quote-'+paymentRef(r)+'.pdf',{type:'application/pdf'});
+ const intro='Hi '+(r.name||'there')+',\n\nPlease find attached your quotation and booking terms for '+(r.date||'your event')+'. Please reply to confirm your acceptance of both.\n\nThanks,\nThe Piccolo Box';
+ if(navigator.canShare&&navigator.canShare({files:[file]})&&navigator.share){
+   try{await navigator.share({files:[file],title:'The Piccolo Box quotation',text:intro});return}catch(e){if(e.name==='AbortError')return}
+ }
+ // Fallback for browsers unable to share file attachments.
+ const url=URL.createObjectURL(file);const a=document.createElement('a');a.href=url;a.download=file.name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+ alert('Your PDF has been saved. Attach it to your email manually.');
 }
+
 function previewQuote(id){
  const r=get(id);if(!r)return;
  const total=amount(r), balance=Math.max(0,total-250);
